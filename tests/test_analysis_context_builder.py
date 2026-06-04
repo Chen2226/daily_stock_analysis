@@ -356,7 +356,7 @@ def test_chip_missing_defaults_to_missing_and_explicit_not_supported() -> None:
         ("ok", ContextFieldStatus.AVAILABLE),
         ("not_supported", ContextFieldStatus.NOT_SUPPORTED),
         ("partial", ContextFieldStatus.PARTIAL),
-        ("failed", ContextFieldStatus.MISSING),
+        ("failed", ContextFieldStatus.FETCH_FAILED),
     ),
 )
 def test_fundamentals_maps_supported_statuses_without_raw_errors(
@@ -414,6 +414,80 @@ def test_news_block_treats_blank_as_missing_and_records_pack_metadata() -> None:
     assert available.blocks["news"].status == ContextFieldStatus.AVAILABLE
     assert available.blocks["news"].items["content"].value == "news"
     assert available.metadata["news_result_count"] == 5
+
+
+def test_data_quality_scores_fixed_blocks_and_limits_auxiliary_missing() -> None:
+    pack = AnalysisContextBuilder.build(_artifacts())
+
+    assert pack.data_quality.overall_score == 100
+    assert pack.data_quality.level == "good"
+    assert pack.data_quality.block_scores == {
+        "quote": 100,
+        "daily_bars": 100,
+        "technical": 100,
+        "news": 100,
+        "fundamentals": 100,
+        "chip": 100,
+    }
+    assert pack.data_quality.limitations == []
+
+    failed_fundamentals = AnalysisContextBuilder.build(
+        _artifacts(
+            fundamental_context={
+                "status": "failed",
+                "coverage": {"valuation": "failed"},
+                "source_chain": [
+                    {"provider": "fundamental_pipeline", "result": "failed"}
+                ],
+            }
+        )
+    )
+    assert failed_fundamentals.blocks["fundamentals"].status == ContextFieldStatus.FETCH_FAILED
+    assert failed_fundamentals.data_quality.block_scores["fundamentals"] == 25
+    assert failed_fundamentals.data_quality.overall_score == 92
+    assert failed_fundamentals.data_quality.level == "good"
+    assert failed_fundamentals.data_quality.limitations == ["fundamentals: fetch_failed"]
+
+    blank_news = AnalysisContextBuilder.build(
+        _artifacts(news_context="  ", news_result_count=0)
+    )
+    assert blank_news.blocks["news"].status == ContextFieldStatus.MISSING
+    assert blank_news.data_quality.block_scores["news"] == 35
+    assert "news: missing" not in blank_news.data_quality.limitations
+
+
+def test_portfolio_block_is_auxiliary_and_does_not_change_quality_score() -> None:
+    baseline = AnalysisContextBuilder.build(_artifacts())
+    pack = AnalysisContextBuilder.build(
+        _artifacts(
+            portfolio_context={
+                "account_id": 7,
+                "account_name": "Main",
+                "symbol": "600519",
+                "market": "cn",
+                "currency": "CNY",
+                "quantity": 100,
+                "avg_cost": 100.0,
+                "total_cost": 10000.0,
+                "unrealized_pnl_base": 500.0,
+                "unrealized_pnl_pct": 5.0,
+                "price_available": False,
+                "cost_method": "fifo",
+                "api_key": "must-not-be-exposed",
+            }
+        )
+    )
+
+    portfolio = pack.blocks["portfolio"]
+    assert portfolio.status == ContextFieldStatus.MISSING
+    assert portfolio.source == "portfolio_context"
+    assert portfolio.metadata == {"auxiliary": True, "quality_weighted": False}
+    assert portfolio.items["quantity"].value == 100
+    assert portfolio.items["price_available"].value is False
+    assert "api_key" not in portfolio.items
+    assert pack.data_quality.overall_score == baseline.data_quality.overall_score
+    assert pack.data_quality.block_scores == baseline.data_quality.block_scores
+    assert "portfolio: missing" not in pack.data_quality.limitations
 
 
 def test_build_batch_returns_one_pack_per_artifact() -> None:
