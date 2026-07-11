@@ -112,6 +112,29 @@ def _coalesce_int(*values: Any) -> Optional[int]:
     return None
 
 
+def _extract_guardrail_reason(raw_result: Any) -> Optional[str]:
+    if not isinstance(raw_result, dict):
+        return None
+    for reason in (
+        raw_result.get("guardrail_reason"),
+        raw_result.get("downgrade_reason"),
+        raw_result.get("decision_score_guardrail_reason"),
+    ):
+        if reason is not None:
+            text = str(reason).strip()
+            if text:
+                return text
+
+    metadata = raw_result.get("metadata")
+    if isinstance(metadata, dict):
+        metadata_reason = metadata.get("guardrail_reason") or metadata.get("downgrade_reason")
+        if metadata_reason is not None:
+            text = str(metadata_reason).strip()
+            if text:
+                return text
+    return None
+
+
 @router.get(
     "",
     response_model=HistoryListResponse,
@@ -341,6 +364,9 @@ def get_stock_bar(
                 report_language=normalize_report_language(
                     _raw_result_value(raw_result, "report_language")
                 ),
+                sentiment_score=sentiment_score,
+                guardrail_reason=_extract_guardrail_reason(raw_result),
+                align_with_score=True,
             )
 
             display_stock_code = service._display_stock_code(record.code)
@@ -359,9 +385,7 @@ def get_stock_bar(
                     action=action_fields["action"],
                     action_label=action_fields["action_label"],
                     analysis_count=analysis_count,
-                    last_analysis_time=(
-                        record.created_at.isoformat() if record.created_at else None
-                    ),
+                    last_analysis_time=service._serialize_created_at(record.created_at),
                     model_used=normalize_model_used(model_used),
                     market_phase_summary=service._display_market_phase_summary(
                         record.code,

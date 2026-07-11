@@ -127,18 +127,35 @@ vi.mock('../../components/settings', () => ({
   LLMChannelEditor: ({
     items,
     onSaved,
+    onDraftItemsChange,
   }: {
     items: Array<{ key: string; value: string }>;
     onSaved: (items: Array<{ key: string; value: string }>) => void;
+    onDraftItemsChange?: (items: Array<{ key: string; value: string }>) => void;
   }) => (
     <div>
       <div data-testid="llm-channel-editor-items">{items.map((item) => item.key).join(',')}</div>
+      <button
+        type="button"
+        onClick={() => onDraftItemsChange?.([
+          { key: 'LLM_CHANNELS', value: 'draft,backup' },
+          { key: 'LITELLM_MODEL', value: 'openai/draft-model' },
+          { key: 'GENERATION_BACKEND', value: 'codex_cli' },
+        ])}
+      >
+        emit llm draft
+      </button>
       <button
         type="button"
         onClick={() => onSaved([{ key: 'LLM_CHANNELS', value: 'primary,backup' }])}
       >
         save llm channels
       </button>
+    </div>
+  ),
+  GenerationBackendStatusPanel: ({ items }: { items: Array<{ key: string; value: string }> }) => (
+    <div data-testid="generation-backend-status-items">
+      {items.map((item) => `${item.key}=${item.value}`).join('|')}
     </div>
   ),
   NotificationTestPanel: ({ items }: { items: Array<{ key: string; value: string }> }) => (
@@ -711,6 +728,61 @@ describe('SettingsPage', () => {
     expect(await screen.findByText(/task-setup-smoke/)).toBeInTheDocument();
   });
 
+  it('allows brief setup smoke when only the Agent channel is incomplete', async () => {
+    useSystemConfigMock.mockReturnValue(buildSystemConfigState({ activeCategory: 'base' }));
+    getSetupStatus.mockResolvedValue({
+      isComplete: false,
+      readyForSmoke: true,
+      requiredMissingKeys: ['llm_agent'],
+      nextStepKey: 'llm_agent',
+      checks: [
+        {
+          key: 'llm_primary',
+          title: 'LLM 主渠道',
+          category: 'ai_model',
+          required: true,
+          status: 'configured',
+          message: '已启用 Claude Code CLI 本地生成 Backend（experimental/limited）。',
+          nextStep: null,
+        },
+        {
+          key: 'llm_agent',
+          title: 'Agent 渠道',
+          category: 'agent',
+          required: true,
+          status: 'needs_action',
+          message: 'Agent 工具调用需要 LiteLLM 模型配置；local CLI 主生成方式不会被自动继承。',
+          nextStep: '如需使用 Ask-Stock Agent，请配置 LiteLLM 模型。',
+        },
+        {
+          key: 'stock_list',
+          title: '自选股',
+          category: 'base',
+          required: true,
+          status: 'configured',
+          message: '已配置 1 只股票。',
+          nextStep: null,
+        },
+      ],
+    });
+
+    render(<SettingsPage />);
+
+    await screen.findByText('还缺少 1 项：Agent 渠道');
+    expect(screen.getByRole('button', { name: '简短试跑' })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole('button', { name: '简短试跑' }));
+
+    await waitFor(() => expect(analyzeAsync).toHaveBeenCalledWith({
+      stockCode: 'SH600000',
+      reportType: 'brief',
+      asyncMode: true,
+      notify: false,
+      originalQuery: 'SH600000',
+      selectionSource: 'manual',
+    }));
+  });
+
   it('shows missing setup items and lets the user reopen the setup check', async () => {
     getSetupStatus.mockResolvedValue({
       isComplete: false,
@@ -1054,6 +1126,52 @@ describe('SettingsPage', () => {
 
     expect(refreshAfterExternalSave).toHaveBeenCalledWith(['LLM_CHANNELS']);
     expect(load).toHaveBeenCalledTimes(1);
+  });
+
+  it('passes merged generation backend draft items to the backend status panel', async () => {
+    useSystemConfigMock.mockReturnValue(buildSystemConfigState({
+      activeCategory: 'ai_model',
+      getChangedItems: () => [
+        { key: 'GENERATION_BACKEND', value: 'litellm' },
+        { key: 'LLM_CHANNELS', value: 'saved' },
+        { key: 'OPENAI_MODEL', value: 'gpt-draft' },
+        { key: 'GEMINI_MODEL', value: 'gemini-draft' },
+        { key: 'OLLAMA_API_BASE', value: 'http://localhost:11434' },
+        { key: 'WECHAT_WEBHOOK_URL', value: 'not-a-url' },
+      ],
+    }));
+
+    render(<SettingsPage />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'emit llm draft' }));
+
+    const statusItems = await screen.findByTestId('generation-backend-status-items');
+    await waitFor(() => {
+      expect(statusItems).toHaveTextContent('GENERATION_BACKEND=litellm');
+      expect(statusItems).toHaveTextContent('LLM_CHANNELS=draft,backup');
+      expect(statusItems).toHaveTextContent('LITELLM_MODEL=openai/draft-model');
+      expect(statusItems).toHaveTextContent('OPENAI_MODEL=gpt-draft');
+      expect(statusItems).toHaveTextContent('GEMINI_MODEL=gemini-draft');
+      expect(statusItems).toHaveTextContent('OLLAMA_API_BASE=http://localhost:11434');
+      expect(statusItems).not.toHaveTextContent('GENERATION_BACKEND=codex_cli');
+      expect(statusItems).not.toHaveTextContent('WECHAT_WEBHOOK_URL=not-a-url');
+    });
+  });
+
+  it('clears llm channel draft items after llm channel editor saves', async () => {
+    useSystemConfigMock.mockReturnValue(buildSystemConfigState({ activeCategory: 'ai_model' }));
+
+    render(<SettingsPage />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'emit llm draft' }));
+    expect(await screen.findByTestId('generation-backend-status-items')).toHaveTextContent('LLM_CHANNELS=draft,backup');
+
+    fireEvent.click(screen.getByRole('button', { name: 'save llm channels' }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('generation-backend-status-items')).not.toHaveTextContent('LLM_CHANNELS=draft,backup');
+    });
+    expect(refreshAfterExternalSave).toHaveBeenCalledWith(['LLM_CHANNELS']);
   });
 
   it('keeps prompt cache settings collapsed and expandable at the bottom of AI model settings', () => {
@@ -1772,11 +1890,11 @@ describe('SettingsPage', () => {
     fireEvent.click(enabledCheckbox);
 
     expect(setDraftValue).toHaveBeenCalledWith('SCHEDULE_ENABLED', 'false');
-    await waitFor(() => expect(enabledCheckbox).not.toBeChecked());
+    await waitFor(() => expect(screen.getByTestId('scheduler-enabled-checkbox')).not.toBeChecked());
 
     const refreshButton = screen.getByTestId('scheduler-refresh-status-button');
     fireEvent.click(refreshButton);
-    await waitFor(() => expect(enabledCheckbox).not.toBeChecked());
+    await waitFor(() => expect(screen.getByTestId('scheduler-enabled-checkbox')).not.toBeChecked());
   });
 
   it('can reconcile runtime scheduler state when runtime is enabled but saved value is disabled', async () => {
